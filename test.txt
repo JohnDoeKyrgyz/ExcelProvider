@@ -1,0 +1,3 @@
+
+
+SimpleExample.fsx(8,22): error FS3039: A direct reference to the generated type 'ExcelFile' is not permitted. Instead, use a type definition, e.g. 'type TypeAlias = <path>'. This indicates that a type provider adds generated types to your assembly.

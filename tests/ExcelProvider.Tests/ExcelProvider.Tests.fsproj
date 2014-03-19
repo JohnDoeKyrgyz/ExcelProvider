@@ -59,6 +59,7 @@
     <Content Include="MultipleRegions.xlsx">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <Compile Include="SpreasheetTypes.fs" />
     <Compile Include="ExcelProvider.Tests.fs" />
     <None Include="packages.config" />
     <None Include="DifferentMainSheet.xlsx" />

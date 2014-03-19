@@ -165,4 +165,3 @@ let public openWorkbookView filename range =
         else range
 
     getView workbook range
-        

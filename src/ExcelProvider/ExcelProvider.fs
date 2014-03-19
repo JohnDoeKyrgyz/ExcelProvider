@@ -2,70 +2,14 @@ module ExcelProvider.ExcelProvider
 
 open System
 open System.Collections.Generic
-open System.Data
 open System.IO
 open System.Reflection
 
-open ExcelProvider.Helper
 open ExcelProvider.ExcelAddressing
-open ICSharpCode.SharpZipLib.Zip
+open ExcelProvider.Helper
+open ExcelProvider.Model
 open Microsoft.FSharp.Core.CompilerServices
 open Samples.FSharp.ProvidedTypes
-
-// Represents a row in a provided ExcelFileInternal
-type Row(rowIndex, getCellValue: int -> int -> obj, columns: Map<string, int>) = 
-    member this.GetValue columnIndex = getCellValue rowIndex columnIndex
-
-    override this.ToString() =
-        let columnValueList =                    
-            [for column in columns do
-                let value = getCellValue rowIndex column.Value
-                let columnName, value = column.Key, string value
-                yield sprintf "\t%s = %s" columnName value]
-            |> String.concat Environment.NewLine
-
-        sprintf "Row %d%s%s" rowIndex Environment.NewLine columnValueList
-
-// get the type, and implementation of a getter property based on a template value
-let internal propertyImplementation columnIndex (value : obj) =
-    match value with
-    | :? float -> typeof<double>, (fun [row] -> <@@ (%%row: Row).GetValue columnIndex |> (fun v -> v :?> double) @@>)
-    | :? bool -> typeof<bool>, (fun [row] -> <@@ (%%row: Row).GetValue columnIndex |> (fun v -> v :?> bool) @@>)
-    | :? DateTime -> typeof<DateTime>, (fun [row] -> <@@ (%%row: Row).GetValue columnIndex |> (fun v -> v :?> DateTime) @@>)
-    | :? string -> typeof<string>, (fun [row] -> <@@ (%%row: Row).GetValue columnIndex |> (fun v -> v :?> string) @@>)
-    | _ -> typeof<obj>, (fun [row] -> <@@ (%%row: Row).GetValue columnIndex @@>)            
-         
-// gets a list of column definition information for the columns in a view         
-let internal getColumnDefinitions (data : View) forcestring =
-    let getCell = getCellValue data
-    [for columnIndex in 0 .. data.ColumnMappings.Count - 1 do
-        let columnName = getCell 0 columnIndex |> string
-        if not (String.IsNullOrWhiteSpace(columnName)) then
-            let cellType, getter =
-                if forcestring then
-                    let getter = (fun [row] -> 
-                    <@@ 
-                        let value = (%%row: Row).GetValue columnIndex |> string
-                        if String.IsNullOrEmpty value then null
-                        else value
-                    @@>)
-                    typedefof<string>, getter
-                else
-                    let cellValue = getCell 1 columnIndex
-                    propertyImplementation columnIndex cellValue             
-            yield (columnName, (columnIndex, cellType, getter))]
-
-// Simple type wrapping Excel data
-type ExcelFileInternal(filename, range) =
-    
-    let data = 
-        let view = openWorkbookView filename range
-        let columns = [for (columnName, (columnIndex, _, _)) in getColumnDefinitions view true -> columnName, columnIndex] |> Map.ofList
-        let buildRow rowIndex = new Row(rowIndex, getCellValue view, columns)        
-        seq{ 1 .. view.RowCount}
-        |> Seq.map buildRow
-
-    member __.Data = data
 
 type internal GlobalSingleton private () =
     static let mutable instance = Dictionary<_, _>()
@@ -78,34 +22,14 @@ let internal memoize f x =
         (GlobalSingleton.Instance).[x] <- res
         res
 
-let internal typExcel(cfg:TypeProviderConfig) =
+let internal typExcel (cfg:TypeProviderConfig) =
 
-   //Re
-    let sharpZipLibAssemblyName = 
-        let zipFileType = typedefof<ZipFile>
-        zipFileType.Assembly.GetName()
-
-    let loadedAssemblies = new HashSet<string>()
-   
-    let resolveAssembly sender (resolveEventArgs : ResolveEventArgs) =        
-        let assemblyName = resolveEventArgs.Name
-        if loadedAssemblies.Add( assemblyName ) then         
-            let assemblyName =
-               if assemblyName.StartsWith(sharpZipLibAssemblyName.Name)
-               then sharpZipLibAssemblyName.FullName
-               else assemblyName
-            Assembly.Load( assemblyName )
-        else null
-
-    do 
-        let handler = new ResolveEventHandler( resolveAssembly )
-        AppDomain.CurrentDomain.add_AssemblyResolve handler
-
-    let executingAssembly = System.Reflection.Assembly.GetExecutingAssembly()   
+    // Create an assembly to host the generated types
+    let executingAssembly = Assembly.GetExecutingAssembly()
 
     // Create the main provided type
     let excelFileProvidedType = ProvidedTypeDefinition(executingAssembly, rootNamespace, "ExcelFile", Some(typeof<ExcelFileInternal>))
-
+    
     // Parameterize the type by the file to use as a template
     let filename = ProvidedStaticParameter("filename", typeof<string>)
     let range = ProvidedStaticParameter("sheetname", typeof<string>, "")
@@ -127,7 +51,7 @@ let internal typExcel(cfg:TypeProviderConfig) =
             let data = openWorkbookView resolvedFilename range
 
             // define a provided type for each row, erasing to a int -> obj
-            let providedRowType = ProvidedTypeDefinition("Row", Some(typeof<Row>))         
+            let providedRowType = ProvidedTypeDefinition("Row", Some(typeof<Row>))
 
             // add one property per Excel field
             let columnProperties = getColumnDefinitions data forcestring
@@ -153,6 +77,16 @@ let internal typExcel(cfg:TypeProviderConfig) =
             // add the row type as a nested type
             providedExcelFileType.AddMember(providedRowType)
 
+            // add the provided types to the generation assembly            
+            let providedAssemblyFilePath = Path.Combine( Path.GetTempPath(), "ExcelProvider.ProvidedTypes-" + Guid.NewGuid().ToString() + ".dll" )
+
+            let providedAssembly = new ProvidedAssembly(providedAssemblyFilePath)
+            let providedTypes = [providedExcelFileType; providedRowType]
+            for providedType in providedTypes do
+                providedType.IsErased <- false
+                providedType.SuppressRelocation <- false
+            providedAssembly.AddTypes(providedTypes)
+
             providedExcelFileType
 
         (memoize ProvidedTypeDefinitionExcelCall)(filename, range, forcestring))
@@ -164,7 +98,9 @@ let internal typExcel(cfg:TypeProviderConfig) =
 type public ExcelProvider(cfg:TypeProviderConfig) as this =
     inherit TypeProviderForNamespaces()
 
-    do this.AddNamespace(rootNamespace,[typExcel cfg])
+    do 
+        let providedType = typExcel cfg        
+        this.AddNamespace(rootNamespace,[providedType])
 
 [<TypeProviderAssembly>]
 do ()
