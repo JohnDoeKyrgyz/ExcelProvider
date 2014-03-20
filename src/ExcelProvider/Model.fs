@@ -8,8 +8,13 @@ open ExcelProvider.ExcelAddressing
 open ICSharpCode.SharpZipLib.Zip
 
 // Represents a row in a provided ExcelFileInternal
-type Row(rowIndex, getCellValue: int -> int -> obj, columns: Map<string, int>) = 
+type RowInternal(rowIndex, getCellValue: int -> int -> obj, columns: Map<string, int>) = 
     member this.GetValue columnIndex = getCellValue rowIndex columnIndex
+
+    member private this.CoerceToString value =        
+        let value = value |> string
+        if String.IsNullOrWhiteSpace(value) then null
+        else value
 
     override this.ToString() =
         let columnValueList =                    
@@ -21,14 +26,13 @@ type Row(rowIndex, getCellValue: int -> int -> obj, columns: Map<string, int>) =
 
         sprintf "Row %d%s%s" rowIndex Environment.NewLine columnValueList
 
-// get the type, and implementation of a getter property based on a template value
-let private propertyImplementation columnIndex (value : obj) =
+let private getColumnTypeFromValue (value : obj) =
     match value with
-    | :? float -> typeof<double>, (fun [row] -> <@@ (%%row: Row).GetValue columnIndex |> (fun v -> v :?> double) @@>)
-    | :? bool -> typeof<bool>, (fun [row] -> <@@ (%%row: Row).GetValue columnIndex |> (fun v -> v :?> bool) @@>)
-    | :? DateTime -> typeof<DateTime>, (fun [row] -> <@@ (%%row: Row).GetValue columnIndex |> (fun v -> v :?> DateTime) @@>)
-    | :? string -> typeof<string>, (fun [row] -> <@@ (%%row: Row).GetValue columnIndex |> (fun v -> v :?> string) @@>)
-    | _ -> typeof<obj>, (fun [row] -> <@@ (%%row: Row).GetValue columnIndex @@>)
+    | :? float -> typeof<double>
+    | :? bool -> typeof<bool>
+    | :? DateTime -> typeof<DateTime>
+    | :? string -> typeof<string>
+    | _ -> typeof<obj>      
 
 // gets a list of column definition information for the columns in a view         
 let internal getColumnDefinitions (data : View) forcestring =
@@ -36,27 +40,20 @@ let internal getColumnDefinitions (data : View) forcestring =
     [for columnIndex in 0 .. data.ColumnMappings.Count - 1 do
         let columnName = getCell 0 columnIndex |> string
         if not (String.IsNullOrWhiteSpace(columnName)) then
-            let cellType, getter =
-                if forcestring then
-                    let getter = (fun [row] -> 
-                    <@@ 
-                        let value = (%%row: Row).GetValue columnIndex |> string
-                        if String.IsNullOrEmpty value then null
-                        else value
-                    @@>)
-                    typedefof<string>, getter
+            let cellType =
+                if forcestring then typedefof<string>
                 else
                     let cellValue = getCell 1 columnIndex
-                    propertyImplementation columnIndex cellValue             
-            yield (columnName, (columnIndex, cellType, getter))]
+                    getColumnTypeFromValue cellValue
+            yield (columnName, (columnIndex, cellType))]
 
 // Simple type wrapping Excel data
 type ExcelFileInternal(filename, range) =
     
     let data = 
         let view = openWorkbookView filename range
-        let columns = [for (columnName, (columnIndex, _, _)) in getColumnDefinitions view true -> columnName, columnIndex] |> Map.ofList
-        let buildRow rowIndex = new Row(rowIndex, getCellValue view, columns)        
+        let columns = [for (columnName, (columnIndex, _)) in getColumnDefinitions view true -> columnName, columnIndex] |> Map.ofList
+        let buildRow rowIndex = new RowInternal(rowIndex, getCellValue view, columns)        
         seq{ 1 .. view.RowCount}
         |> Seq.map buildRow
 

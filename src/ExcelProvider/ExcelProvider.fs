@@ -21,6 +21,21 @@ let internal memoize f x =
         let res = f x
         (GlobalSingleton.Instance).[x] <- res
         res
+    
+// creates an expression that can serve as the body for a property getter
+let internal buildPropertyGetter (rowType : Type) propertyType (columnIndex : int) parameters =
+    let getValueMethod = rowType.GetMethod("GetValue")
+    let this = parameters |> List.head
+    Quotations.Expr.Coerce( Quotations.Expr.Call( this, getValueMethod, [ <@@ columnIndex @@> ] ), propertyType )
+
+// creates an expression that can serve as the body for a property getter that forces the output to be a string
+let internal buildForceStringPropertyGetter (rowType : Type) (columnIndex : int) parameters =
+    let standardGetter = buildPropertyGetter rowType typedefof<obj> columnIndex parameters
+    let coerceMethod = rowType.GetMethod("CoerceToString")
+    let this = parameters |> List.head
+    Quotations.Expr.Call(this, coerceMethod, [standardGetter])
+    
+let dummyGetter (rowType : Type) [parameters] = <@@ null @@>
 
 let internal typExcel (cfg:TypeProviderConfig) =
 
@@ -28,7 +43,7 @@ let internal typExcel (cfg:TypeProviderConfig) =
     let executingAssembly = Assembly.GetExecutingAssembly()
 
     // Create the main provided type
-    let excelFileProvidedType = ProvidedTypeDefinition(executingAssembly, rootNamespace, "ExcelFile", Some(typeof<ExcelFileInternal>))
+    let excelFileProvidedType = ProvidedTypeDefinition(executingAssembly, rootNamespace, "ExcelFile", Some(typeof<obj>))
     
     // Parameterize the type by the file to use as a template
     let filename = ProvidedStaticParameter("filename", typeof<string>)
@@ -51,28 +66,41 @@ let internal typExcel (cfg:TypeProviderConfig) =
             let data = openWorkbookView resolvedFilename range
 
             // define a provided type for each row, erasing to a int -> obj
-            let providedRowType = ProvidedTypeDefinition("Row", Some(typeof<Row>))
+            let providedRowType = ProvidedTypeDefinition("Row", Some(typeof<RowInternal>))            
 
             // add one property per Excel field
             let columnProperties = getColumnDefinitions data forcestring
-            for (columnName, (columnIndex, propertyType, getter)) in columnProperties do            
+            for (columnName, (columnIndex, propertyType)) in columnProperties do
+
+                let getter = dummyGetter providedRowType
+//                    if forcestring then buildForceStringPropertyGetter providedRowType columnIndex
+//                    else buildPropertyGetter providedRowType propertyType columnIndex
 
                 let prop = ProvidedProperty(columnName, propertyType, GetterCode = getter)
                 // Add metadata defining the property's location in the referenced file
                 prop.AddDefinitionLocation(1, columnIndex, filename)
-                providedRowType.AddMember(prop)
+                providedRowType.AddMemberDelayed (fun () -> prop)
 
             // define the provided type, erasing to an seq<int -> obj>
             let providedExcelFileType = ProvidedTypeDefinition(executingAssembly, rootNamespace, tyName, Some(typeof<ExcelFileInternal>))
 
+            let baseConstructor = typedefof<ExcelFileInternal>.GetConstructor([|typedefof<string>; typedefof<string>|])
+
             // add a parameterless constructor which loads the file that was used to define the schema
-            providedExcelFileType.AddMember(ProvidedConstructor([], InvokeCode = fun [] -> <@@ ExcelFileInternal(resolvedFilename, range) @@>))
+            let providedConstructor = ProvidedConstructor([], InvokeCode = fun [] -> <@@ ExcelFileInternal(resolvedFilename, range) @@>)            
+            providedConstructor.BaseConstructorCall <- fun [] -> baseConstructor, [ <@@ ExcelFileInternal(resolvedFilename, range) @@> ]
+            providedExcelFileType.AddMember( providedConstructor )
 
             // add a constructor taking the filename to load
-            providedExcelFileType.AddMember(ProvidedConstructor([ProvidedParameter("filename", typeof<string>)], InvokeCode = fun [filename] -> <@@ ExcelFileInternal(%%filename, range) @@>))
+            let filenameParameter = ProvidedParameter("filename", typeof<string>)
+            let providedConstructor = ProvidedConstructor([filenameParameter], InvokeCode = fun [filename] -> <@@ ExcelFileInternal(%%filename, range) @@> )
+            providedConstructor.BaseConstructorCall <- (fun [filename] -> baseConstructor, [ <@@ ExcelFileInternal(%%filename, range) @@> ])
+            providedExcelFileType.AddMember( providedConstructor )
 
             // add a new, more strongly typed Data property (which uses the existing property at runtime)
-            providedExcelFileType.AddMember(ProvidedProperty("Data", typedefof<seq<_>>.MakeGenericType(providedRowType), GetterCode =fun [excFile] -> <@@ (%%excFile:ExcelFileInternal).Data @@>))
+            let dataPropertyType = typedefof<seq<_>>.MakeGenericType(providedRowType)
+            let dataProperty = ProvidedProperty("Data", dataPropertyType, GetterCode = fun [excFile] -> <@@ (%%excFile:ExcelFileInternal).Data @@>)
+            providedExcelFileType.AddMember( dataProperty )
 
             // add the row type as a nested type
             providedExcelFileType.AddMember(providedRowType)
@@ -81,7 +109,7 @@ let internal typExcel (cfg:TypeProviderConfig) =
             let providedAssemblyFilePath = Path.Combine( Path.GetTempPath(), "ExcelProvider.ProvidedTypes-" + Guid.NewGuid().ToString() + ".dll" )
 
             let providedAssembly = new ProvidedAssembly(providedAssemblyFilePath)
-            let providedTypes = [providedExcelFileType; providedRowType]
+            let providedTypes = [providedRowType; excelFileProvidedType]
             for providedType in providedTypes do
                 providedType.IsErased <- false
                 providedType.SuppressRelocation <- false
