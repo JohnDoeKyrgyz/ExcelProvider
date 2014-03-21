@@ -7,24 +7,6 @@ open System.Reflection
 open ExcelProvider.ExcelAddressing
 open ICSharpCode.SharpZipLib.Zip
 
-// Represents a row in a provided ExcelFileInternal
-type RowInternal(rowIndex, getCellValue: int -> int -> obj, columns: Map<string, int>) = 
-    member this.GetValue columnIndex = getCellValue rowIndex columnIndex
-
-    member private this.CoerceToString value =        
-        let value = value |> string
-        if String.IsNullOrWhiteSpace(value) then null
-        else value
-
-    override this.ToString() =
-        let columnValueList =                    
-            [for column in columns do
-                let value = getCellValue rowIndex column.Value
-                let columnName, value = column.Key, string value
-                yield sprintf "\t%s = %s" columnName value]
-            |> String.concat Environment.NewLine
-
-        sprintf "Row %d%s%s" rowIndex Environment.NewLine columnValueList
 
 let private getColumnTypeFromValue (value : obj) =
     match value with
@@ -48,16 +30,38 @@ let internal getColumnDefinitions (data : View) forcestring =
             yield (columnName, (columnIndex, cellType))]
 
 // Simple type wrapping Excel data
-type ExcelFileInternal(filename, range) =
+type ExcelFileInternal<'TRow when 'TRow :> RowInternal>(filename, range, buildRow : ExcelFileInternal<'TRow> -> int -> 'TRow) as this =
     
-    let data = 
-        let view = openWorkbookView filename range
-        let columns = [for (columnName, (columnIndex, _)) in getColumnDefinitions view true -> columnName, columnIndex] |> Map.ofList
-        let buildRow rowIndex = new RowInternal(rowIndex, getCellValue view, columns)        
+    let view = openWorkbookView filename range
+    let columns = [for (columnName, (columnIndex, _)) in getColumnDefinitions view true -> columnName, columnIndex] |> Map.ofList
+    let data =
+        let buildRow = buildRow this
         seq{ 1 .. view.RowCount}
         |> Seq.map buildRow
 
     member __.Data = data
+    member internal __.View = view
+    member internal __.Columns = columns
+
+// Represents a row in a provided ExcelFileInternal
+and RowInternal(excelFile: ExcelFileInternal<_>, rowIndex) =
+ 
+    member this.GetValue columnIndex = getCellValue excelFile.View rowIndex columnIndex
+
+    member private this.CoerceToString value =        
+        let value = value |> string
+        if String.IsNullOrWhiteSpace(value) then null
+        else value
+
+    override this.ToString() =
+        let columnValueList =                    
+            [for column in excelFile.Columns do
+                let value = getCellValue excelFile.View rowIndex column.Value
+                let columnName, value = column.Key, string value
+                yield sprintf "\t%s = %s" columnName value]
+            |> String.concat Environment.NewLine
+
+        sprintf "Row %d%s%s" rowIndex Environment.NewLine columnValueList
 
 // Set up assembly reference forwarding for the ICSharpCode.SharpZipLib assembly.
 // This would normally be done in an app.config file, but this is not convenient, as this assembly will be dynmically generated.
